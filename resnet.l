@@ -1,7 +1,11 @@
+(from lumen import nil?)
+(from lumen import is?)
+(from lumen import getenv)
 
 (from absl import flags)
 (import tensorflow as tf)
-(from tensorflow.contrib.tpu.python.ops import tpu-ops)
+(import tensorflow.compat.v1 as tf1)
+(from tensorflow.python.tpu.ops import tpu-ops)
 (from tensorflow.python.training import moving-averages)
 
 
@@ -71,37 +75,37 @@
   Returns:
     A `Tensor` representing the output of the operation.
   """
-  (with (tf.variable-scope scope "batch_normalization" (list inputs) reuse: nil)
+  (with (tf1.variable-scope scope "batch_normalization" (list inputs) reuse: nil)
     (set inputs (tf.convert-to-tensor inputs)
          inputs-shape (inputs (.get-shape))
          params-shape (get inputs-shape (: -1 nil)))
     (unless (params-shape (.is-fully-defined))
       (raise (ValueError (% "Inputs %s has undefined `C` dimension %s." (inputs .name) params-shape))))
     ; Allocate parameters for the beta and gamma of the normalization.
-    (set beta (tf.get-variable "beta"
+    (set beta (tf1.get-variable "beta"
                                 shape: params-shape
                                 dtype: tf.float32
                                 initializer: (tf.zeros-initializer)
                                 trainable: true))
-    (set gamma (tf.get-variable "gamma"
+    (set gamma (tf1.get-variable "gamma"
                                  shape: params-shape
                                  dtype: tf.float32
                                  initializer: gamma-initializer
                                  trainable: true))
     ; Disable partition setting for moving_mean and moving_variance
     ; as assign_moving_average op below doesn't support partitioned variable.
-    (set scope (tf.get-variable-scope))
+    (set scope (tf1.get-variable-scope))
     (set partitioner (scope .partitioner))
     (scope (.set-partitioner nil))
-    (set moving-mean (tf.get-variable "moving_mean"
+    (set moving-mean (tf1.get-variable "moving_mean"
                                        shape: params-shape
                                        dtype: tf.float32
                                        initializer: (tf.zeros-initializer)
                                        trainable: false))
-    (set moving-variance (tf.get-variable "moving_variance"
-                                          shape: params-shape
-                                          initializer: (tf.ones-initializer)
-                                          trainable: false))
+    (set moving-variance (tf1.get-variable "moving_variance"
+                                           shape: params-shape
+                                           initializer: (tf.ones-initializer)
+                                           trainable: false))
     ; Restore scope's partitioner setting.
     (scope (.set-partitioner partitioner))
     ; Add cross replica sum to do subset mean and variance calculation
@@ -114,7 +118,7 @@
                inputs (tf.cast inputs tf.float32)
                ndims (len inputs-shape)
                reduction-axes (list i for i in (range ndims) if (not (= i axis)))
-               counts, mean-ss, variance-ss, _ (tf.nn.sufficient-statistics inputs reduction-axes keep-dims: false)
+               counts, mean-ss, variance-ss, _ (tf1.nn.sufficient-statistics inputs reduction-axes keep-dims: false)
                mean-ss (cross-replica-average mean-ss num-shards distributed-group-size)
                variance-ss (cross-replica-average variance-ss num-shards distributed-group-size)
                mean, variance (tf.nn.normalize-moments counts mean-ss variance-ss shift: nil)
@@ -142,8 +146,8 @@
                (tf.cast variance moving-variance.dtype)
                decay
                zero-debias: false))
-        (tf.add-to-collection "update_ops" update-moving-mean)
-        (tf.add-to-collection "update_ops" update-moving-variance))
+        (tf1.add-to-collection "update_ops" update-moving-mean)
+        (tf1.add-to-collection "update_ops" update-moving-variance))
       (outputs.set-shape inputs-shape))))
 
 (def batch-norm-relu (inputs is-training (o relu true) (o init-zero false) (o data-format "channels_first")
@@ -163,6 +167,8 @@
   Returns:
     A normalized `Tensor` with the same `data_format`.
   """
+  (set num-cores (or num-cores 1)
+       distributed-group-size (or distributed-group-size 2))
   (set gamma-initializer ((if init-zero tf.zeros-initializer tf.ones-initializer)))
   (set axis (if (= data-format "channels_first") 1 3))
   (with inputs (if (> distributed-group-size 1)
@@ -175,7 +181,7 @@
                          gamma-initializer: gamma-initializer
                          num-shards: num-cores
                          distributed-group-size: distributed-group-size))
-                   (tf.layers.batch-normalization
+                   (tf1.layers.batch-normalization
                      inputs: inputs
                      axis: axis
                      momentum: BATCH-NORM-DECAY
@@ -234,16 +240,233 @@
   """
   (when (> strides 1)
     (set inputs (fixed-padding inputs kernel-size data-format: data-format)))
-
-  (tf.layers.conv2d
+  (tf1.layers.conv2d
       inputs: inputs
       filters: filters
       kernel-size: kernel-size
       strides: strides
       padding: (if (= strides 1) "SAME" "VALID")
       use-bias: false
-      kernel-initializer: (tf.variance-scaling-initializer)
+      kernel-initializer: (tf1.variance-scaling-initializer)
       data-format: data-format))
+
+(def residual-block (inputs filters is-training strides (o use-projection false) (o data-format "channels_first"))
+  """Standard building block for residual networks with BN after convolutions.
+
+  Args:
+    inputs: `Tensor` of size `[batch, channels, height, width]`.
+    filters: `int` number of filters for the first two convolutions. Note that
+        the third and final convolution will use 4 times as many filters.
+    is_training: `bool` for whether the model is in training.
+    strides: `int` block stride. If greater than 1, this block will ultimately
+        downsample the input.
+    use_projection: `bool` for whether this block should use a projection
+        shortcut (versus the default identity shortcut). This is usually `True`
+        for the first block of a block group, which may change the number of
+        filters and the resolution.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    The output `Tensor` of the block.
+  """
+  (set shortcut inputs)
+  (when use-projection
+    ; Projection shortcut in first layer to match filters and strides
+    (set shortcut (conv2d-fixed-padding
+                    inputs: inputs
+                    filters: filters
+                    kernel-size: 1
+                    strides: strides
+                    data-format: data-format))
+    (set shortcut (batch-norm-relu shortcut is-training relu: false data-format: data-format)))
+
+  (set inputs (conv2d-fixed-padding
+                inputs: inputs
+                filters: filters
+                kernel-size: 3
+                strides: strides
+                data-format: data-format))
+  (set inputs (batch-norm-relu inputs is-training data-format: data-format))
+
+  (set inputs (conv2d-fixed-padding
+                inputs: inputs
+                filters: filters
+                kernel-size: 3
+                strides: 1
+                data-format: data-format))
+  (set inputs (batch-norm-relu inputs is-training relu: false init-zero: true data-format: data-format))
+  (tf.nn.relu (+ inputs shortcut)))
+
+(def bottleneck_block (inputs filters is_training strides (o use_projection false) (o data_format "channels_first"))
+  """Bottleneck block variant for residual networks with BN after convolutions.
+
+  Args:
+    inputs: `Tensor` of size `[batch, channels, height, width]`.
+    filters: `int` number of filters for the first two convolutions. Note that
+        the third and final convolution will use 4 times as many filters.
+    is_training: `bool` for whether the model is in training.
+    strides: `int` block stride. If greater than 1, this block will ultimately
+        downsample the input.
+    use_projection: `bool` for whether this block should use a projection
+        shortcut (versus the default identity shortcut). This is usually `True`
+        for the first block of a block group, which may change the number of
+        filters and the resolution.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    The output `Tensor` of the block.
+  """
+  (set shortcut inputs)
+  (when use-projection
+    ; Projection shortcut only in first block within a group. Bottleneck blocks
+    ; end with 4 times the number of filters.
+    (set filters-out (* 4 filters))
+    (set shortcut (conv2d-fixed-padding
+                    inputs: inputs
+                    filters: filters_out
+                    kernel_size: 1
+                    strides: strides
+                    data_format: data_format)
+         shortcut (batch-norm-relu shortcut is-training relu: false data-format: data-format)))
+
+  (set inputs (conv2d-fixed-padding
+                inputs: inputs
+                filters: filters
+                kernel-size: 1
+                strides: 1
+                data-format: data-format))
+  (set inputs (batch-norm-relu inputs is-training data-format: data-format))
+
+  (set inputs (conv2d-fixed-padding
+                inputs: inputs
+                filters: filters
+                kernel-size: 3
+                strides: strides
+                data-format: data-format))
+  (set inputs (batch-norm-relu inputs is-training data-format: data-format))
+
+  (set inputs (conv2d-fixed-padding
+                inputs: inputs
+                filters: (* 4 filters)
+                kernel-size: 1
+                strides: 1
+                data-format: data-format))
+  (set inputs (batch-norm-relu inputs is-training relu: false init-zero: true data-format: data-format))
+  (tf1.nn.relu (+ inputs shortcut)))
+
+(def block-group (inputs filters block_fn blocks strides is_training name (o data_format "channels_first"))
+  """Creates one group of blocks for the ResNet model.
+
+  Args:
+    inputs: `Tensor` of size `[batch, channels, height, width]`.
+    filters: `int` number of filters for the first convolution of the layer.
+    block_fn: `function` for the block to use within the model
+    blocks: `int` number of blocks contained in the layer.
+    strides: `int` stride to use for the first convolution of the layer. If
+        greater than 1, this layer will downsample the input.
+    is_training: `bool` for whether the model is training.
+    name: `str`name for the Tensor output of the block layer.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    The output `Tensor` of the block layer.
+  """
+  ; Only the first block per block_group uses projection shortcut and strides.
+  (set inputs (block-fn inputs filters is-training strides use-projection: true data-format: data-format))
+  (for _ in (range 1 blocks)
+    (set inputs (block-fn inputs filters is-training 1 data-format: data-format)))
+  (tf.identity inputs name))
+
+(def resnet-v1 (resnet-depth num-classes (o data-format "channels_first"))
+  """Returns the ResNet model for a given size and number of output classes."""
+  (set model-params
+       (%object
+         18 (obj block: residual-block layers: '(2 2 2 2))
+         34 (obj block: residual-block layers: '(3 4 6 3))
+         50 (obj block: bottleneck-block layers: '(3 4 6 3))
+         101 (obj block: bottleneck-block layers: '(3 4 23 3))
+         152 (obj block: bottleneck-block layers: '(3 8 36 3))
+         200 (obj block: bottleneck-block layers: '(3 24 36 3))))
+
+  (unless (in resnet-depth model-params)
+    (raise (ValueError "Not a valid resnet_depth:" resnet-depth)))
+
+  (set params (get model-params resnet-depth))
+
+  (resnet-v1-generator
+    (get params 'block)
+    (get params 'layers)
+    num-classes
+    data-format))
+
+(def resnet-v1-generator (block-fn layers num-classes (o data-format "channels_first"))
+  """Generator for ResNet v1 models.
+
+  Args:
+    block_fn: `function` for the block to use within the model. Either
+        `residual_block` or `bottleneck_block`.
+    layers: list of 4 `int`s denoting the number of blocks to include in each
+      of the 4 block groups. Each group consists of blocks that take inputs of
+      the same resolution.
+    num_classes: `int` number of possible classes for image classification.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    Model `function` that takes in `inputs` and `is_training` and returns the
+    output `Tensor` of the ResNet model.
+  """
+  (def model (inputs is-training)
+    """Creation of the model graph."""
+
+    (set inputs (conv2d-fixed-padding
+                  inputs: inputs
+                  filters: 64
+                  kernel-size: 7
+                  strides: 2
+                  data-format: data-format)
+         inputs (tf.identity inputs "initial-conv")
+         inputs (batch-norm-relu inputs is-training data-format: data-format)
+
+         pooled-inputs (tf1.layers.max-pooling2d
+                         inputs: inputs pool-size: 3 strides: 2 padding: "SAME"
+                         data-format: data-format)
+         inputs (tf.identity pooled-inputs "initial_max_pool")
+
+         inputs (block-group
+                  inputs: inputs filters: 64 block-fn: block-fn blocks: (at layers 0)
+                  strides: 1 is-training: is-training name: "block_group1"
+                  data-format: data-format)
+         inputs (block-group
+                  inputs: inputs filters: 128 block-fn: block-fn blocks: (at layers 1)
+                  strides: 2 is-training: is-training name: "block_group2"
+                  data-format: data-format)
+         inputs (block-group
+                  inputs: inputs filters: 256 block-fn: block-fn blocks: (at layers 2)
+                  strides: 2 is-training: is-training name: "block_group3"
+                  data-format: data-format)
+         inputs (block-group
+                  inputs: inputs filters: 512 block-fn: block-fn blocks: (at layers 3)
+                  strides: 2 is-training: is-training name: "block_group4"
+                  data-format: data-format))
+    ; The activation is 7x7 so this is a global average pool.
+    ; TODO(huangyp): reduce_mean will be faster.
+    (set pool-size (list inputs.shape.1 inputs.shape.2))
+    (set inputs (tf1.layers.average-pooling2d
+                  inputs: inputs pool-size: pool-size strides: 1 padding: "VALID"
+                  data-format: data-format)
+         inputs (tf.identity inputs "final_avg_pool")
+         inputs (tf.reshape inputs (list -1 (if (is block-fn bottleneck-block ) 2048 512)))
+         inputs (tf1.layers.dense
+                  inputs: inputs
+                  units: num-classes
+                  kernel-initializer: (tf1.random-normal-initializer stddev: 0.01))))
+  (set model.default-image-size 224)
+  model)
+
 
 (def i (x) (tf.transpose x '(0 2 3 1)))
 (def o (x) (tf.transpose x '(0 3 1 2)))
@@ -252,4 +475,14 @@
   (session.run (tf.global-variables-initializer))
   (session.run (tf.local-variables-initializer))
   (session.run op))
+
+(from tensorflow.python.framework.ops import disable-eager-execution)
+
+(defvar sess nil)
+
+(def setup ()
+  (global sess)
+  (disable-eager-execution)
+  (when sess (sess (.close)))
+  (set sess (tf1 (.InteractiveSession))))
 
