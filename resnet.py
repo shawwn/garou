@@ -1,11 +1,87 @@
 from lumen import nil63
 from lumen import is63
 from lumen import getenv
+from lumen import setenv
+from lumen import either
+from lumen import unstash
+from lumen import destash33
+from lumen import has
+from lumen import object
+from lumen import without
+from lumen import cut
 from absl import flags
 import tensorflow as tf
 import tensorflow.compat.v1 as tf1
 from tensorflow.python.tpu.ops import tpu_ops
 from tensorflow.python.training import moving_averages
+def expanded_body(body=None):
+  __form1 = expand(join(["%do"], body))
+  if hd63(__form1, "%do"):
+    return tl(__form1)
+  else:
+    return [__form1]
+
+def compiled_special63(form=None):
+  return list63(form) and (hd63(form, string63) and (char(hd(form), 0) == "%" and (L_35(hd(form)) > 1 and not( char(hd(form), 1) == "%"))))
+
+def __f3(name=None, *_args, **_keys):
+  ____r5 = unstash(list(_args), _keys)
+  __name1 = destash33(name, ____r5)
+  ____id1 = ____r5
+  __e5 = None
+  if nil63(has(____id1, "scope")):
+    __e5 = "nil"
+  else:
+    __e5 = has(____id1, "scope")
+  __scope1 = __e5
+  __e6 = None
+  if nil63(has(____id1, "reuse")):
+    __e6 = "nil"
+  else:
+    __e6 = has(____id1, "reuse")
+  __reuse1 = __e6
+  ____x11 = object([])
+  ____x11["scope"] = ["o", "scope", ["quote", "nil"]]
+  ____x11["reuse"] = ["o", "reuse", ["quote", "nil"]]
+  ____x11["rest"] = "body"
+  __body1 = without(cut(____id1, 0), ____x11)
+  ____x17 = object(["tf1.variable-scope", __scope1, __name1])
+  ____x17["reuse"] = __reuse1
+  return join(["with", ____x17], __body1)
+
+setenv("tf-scope", macro=__f3)
+def __f4(inputs=None, name=None, *_args, **_keys):
+  ____r8 = unstash(list(_args), _keys)
+  __inputs1 = destash33(inputs, ____r8)
+  __name3 = destash33(name, ____r8)
+  ____id3 = ____r8
+  __e7 = None
+  if nil63(has(____id3, "scope")):
+    __e7 = "nil"
+  else:
+    __e7 = has(____id3, "scope")
+  __scope3 = __e7
+  __e8 = None
+  if nil63(has(____id3, "reuse")):
+    __e8 = "nil"
+  else:
+    __e8 = has(____id3, "reuse")
+  __reuse3 = __e8
+  ____x30 = object([])
+  ____x30["scope"] = ["o", "scope", ["quote", "nil"]]
+  ____x30["reuse"] = ["o", "reuse", ["quote", "nil"]]
+  ____x30["rest"] = "body"
+  __body3 = without(cut(____id3, 0), ____x30)
+  ____x36 = object(["tf1.variable-scope", __scope3, __name3])
+  ____x36["reuse"] = __reuse3
+  def __f5(x=None):
+    if compiled_special63(x):
+      return x
+    else:
+      return ["set", __inputs1, ["either", x, __inputs1]]
+  return join(["with", ____x36], map(__f5, expanded_body(__body3)), [["set", __inputs1, ["tf.identity", __inputs1, __name3]]])
+
+setenv("tf-named", macro=__f4)
 BATCH_NORM_DECAY = 0.9
 BATCH_NORM_EPSILON = 1e-05
 FLAGS = flags.FLAGS
@@ -71,18 +147,16 @@ def distributed_batch_norm(inputs=None, decay=None, epsilon=None, is_training=No
   if nil63(num_shards):
     num_shards = None
   if nil63(distributed_group_size):
-    distributed_group_size = 2
+    distributed_group_size = 1
   if nil63(scope):
     scope = None
-  __e = None
-  with tf1.variable_scope(scope, "batch_normalization", [inputs], reuse=None):
-    inputs = tf.convert_to_tensor(inputs)
-    inputs_shape = inputs.get_shape()
-    params_shape = inputs_shape[-1:None]
-    __e1 = None
-    if not params_shape.is_fully_defined():
-      raise ValueError("Inputs %s has undefined `C` dimension %s." % inputs.name % params_shape)
-      __e1 = None
+  inputs = tf.convert_to_tensor(inputs)
+  inputs_shape = inputs.get_shape()
+  params_shape = inputs_shape[-1:None]
+  if not params_shape.is_fully_defined():
+    raise ValueError("Inputs %s has undefined `C` dimension %s." % inputs.name % params_shape)
+  __e9 = None
+  with tf1.variable_scope(scope, "batch_normalization", reuse=None):
     beta = tf1.get_variable("beta", shape=params_shape, dtype=tf.float32, initializer=tf.zeros_initializer(), trainable=True)
     gamma = tf1.get_variable("gamma", shape=params_shape, dtype=tf.float32, initializer=gamma_initializer, trainable=True)
     scope = tf1.get_variable_scope()
@@ -92,7 +166,7 @@ def distributed_batch_norm(inputs=None, decay=None, epsilon=None, is_training=No
     moving_variance = tf1.get_variable("moving_variance", shape=params_shape, initializer=tf.ones_initializer(), trainable=False)
     scope.set_partitioner(partitioner)
     __outputs = None
-    __e2 = None
+    __e10 = None
     if is_training:
       axis = 3
       inputs_dtype = inputs.dtype
@@ -105,19 +179,19 @@ def distributed_batch_norm(inputs=None, decay=None, epsilon=None, is_training=No
       mean, variance = tf.nn.normalize_moments(counts, mean_ss, variance_ss, shift=None)
       __outputs = tf.nn.batch_normalization(inputs, mean, variance, beta, gamma, epsilon)
       __outputs = tf.cast(__outputs, inputs_dtype)
-      __e2 = __outputs
+      __e10 = __outputs
     else:
       __outputs, mean, variance = tf.nn.fused_batch_norm(inputs, gamma, beta, mean=moving_mean, variance=moving_variance, epsilon=epsilon, is_training=False, data_format="NHWC")
-      __e2 = __outputs, mean, variance
-    __e3 = None
+      __e10 = __outputs, mean, variance
+    __e11 = None
     if is_training:
       update_moving_mean = moving_averages.assign_moving_average(moving_mean, tf.cast(mean, moving_mean.dtype), decay, zero_debias=False)
       update_moving_variance = moving_averages.assign_moving_average(moving_variance, tf.cast(variance, moving_variance.dtype), decay, zero_debias=False)
       tf1.add_to_collection("update_ops", update_moving_mean)
-      __e3 = tf1.add_to_collection("update_ops", update_moving_variance)
+      __e11 = tf1.add_to_collection("update_ops", update_moving_variance)
     __outputs.set_shape(inputs_shape)
-    __e = __outputs
-  return __e
+    __e9 = __outputs
+  return __e9
 
 def batch_norm_relu(inputs=None, is_training=None, relu=None, init_zero=None, data_format=None, num_cores=None, distributed_group_size=None):
   """Performs a batch normalization followed by a ReLU.
@@ -145,29 +219,29 @@ def batch_norm_relu(inputs=None, is_training=None, relu=None, init_zero=None, da
   if nil63(distributed_group_size):
     distributed_group_size = getenv("distributed-group-size", "value")
   num_cores = num_cores or 1
-  distributed_group_size = distributed_group_size or 2
-  __e4 = None
+  distributed_group_size = distributed_group_size or 1
+  __e12 = None
   if init_zero:
-    __e4 = tf.zeros_initializer
+    __e12 = tf.zeros_initializer
   else:
-    __e4 = tf.ones_initializer
-  gamma_initializer = __e4()
-  __e5 = None
+    __e12 = tf.ones_initializer
+  gamma_initializer = __e12()
+  __e13 = None
   if data_format == "channels_first":
-    __e5 = 1
+    __e13 = 1
   else:
-    __e5 = 3
-  axis = __e5
-  __e6 = None
+    __e13 = 3
+  axis = __e13
+  __e14 = None
   if distributed_group_size > 1:
     assert(data_format == "channels_last")
-    __e6 = distributed_batch_norm(inputs=inputs, decay=BATCH_NORM_DECAY, epsilon=BATCH_NORM_EPSILON, is_training=is_training, gamma_initializer=gamma_initializer, num_shards=num_cores, distributed_group_size=distributed_group_size)
+    __e14 = distributed_batch_norm(inputs=inputs, decay=BATCH_NORM_DECAY, epsilon=BATCH_NORM_EPSILON, is_training=is_training, gamma_initializer=gamma_initializer, num_shards=num_cores, distributed_group_size=distributed_group_size)
   else:
-    __e6 = tf1.layers.batch_normalization(inputs=inputs, axis=axis, momentum=BATCH_NORM_DECAY, epsilon=BATCH_NORM_EPSILON, center=True, scale=True, training=is_training, fused=True, gamma_initializer=gamma_initializer)
-  __inputs = __e6
+    __e14 = tf1.layers.batch_normalization(inputs=inputs, axis=axis, momentum=BATCH_NORM_DECAY, epsilon=BATCH_NORM_EPSILON, center=True, scale=True, training=is_training, fused=True, gamma_initializer=gamma_initializer)
+  __inputs2 = __e14
   if relu:
-    __inputs = tf.nn.relu(__inputs)
-  return __inputs
+    __inputs2 = tf.nn.relu(__inputs2)
+  return __inputs2
 
 def fixed_padding(inputs=None, kernel_size=None, data_format=None):
   """Pads the input along the spatial dimensions independently of input size.
@@ -215,12 +289,12 @@ def conv2d_fixed_padding(inputs=None, filters=None, kernel_size=None, strides=No
     data_format = "channels_first"
   if strides > 1:
     inputs = fixed_padding(inputs, kernel_size, data_format=data_format)
-  __e7 = None
+  __e15 = None
   if strides == 1:
-    __e7 = "SAME"
+    __e15 = "SAME"
   else:
-    __e7 = "VALID"
-  return tf1.layers.conv2d(inputs=inputs, filters=filters, kernel_size=kernel_size, strides=strides, padding=__e7, use_bias=False, kernel_initializer=tf1.variance_scaling_initializer(), data_format=data_format)
+    __e15 = "VALID"
+  return tf1.layers.conv2d(inputs=inputs, filters=filters, kernel_size=kernel_size, strides=strides, padding=__e15, use_bias=False, kernel_initializer=tf1.variance_scaling_initializer(), data_format=data_format)
 
 def residual_block(inputs=None, filters=None, is_training=None, strides=None, use_projection=None, data_format=None):
   """Standard building block for residual networks with BN after convolutions.
@@ -293,7 +367,7 @@ def bottleneck_block(inputs=None, filters=None, is_training=None, strides=None, 
   inputs = batch_norm_relu(inputs, is_training, relu=False, init_zero=True, data_format=data_format)
   return tf1.nn.relu(inputs + shortcut)
 
-def block_group(inputs=None, filters=None, block_fn=None, blocks=None, strides=None, is_training=None, name=None, data_format=None):
+def block_group(inputs=None, filters=None, block_fn=None, blocks=None, strides=None, is_training=None, name=None, data_format=None, scope=None):
   """Creates one group of blocks for the ResNet model.
 
   Args:
@@ -313,9 +387,12 @@ def block_group(inputs=None, filters=None, block_fn=None, blocks=None, strides=N
   """
   if nil63(data_format):
     data_format = "channels_first"
-  inputs = block_fn(inputs, filters, is_training, strides, use_projection=True, data_format=data_format)
-  for _ in range(1, blocks):
-    inputs = block_fn(inputs, filters, is_training, 1, data_format=data_format)
+  if nil63(scope):
+    scope = None
+  with tf1.variable_scope(scope, name, [inputs], reuse=None):
+    inputs = block_fn(inputs, filters, is_training, strides, use_projection=True, data_format=data_format)
+    for _ in range(1, blocks):
+      inputs = block_fn(inputs, filters, is_training, 1, data_format=data_format)
   return tf.identity(inputs, name)
 
 def resnet_v1(resnet_depth=None, num_classes=None, data_format=None):
@@ -374,26 +451,36 @@ def resnet_v1_generator(block_fn=None, layers=None, num_classes=None, data_forma
     data_format = "channels_first"
   def model(inputs=None, is_training=None):
     """Creation of the model graph."""
-    inputs = conv2d_fixed_padding(inputs=inputs, filters=64, kernel_size=7, strides=2, data_format=data_format)
-    inputs = tf.identity(inputs, "initial-conv")
-    inputs = batch_norm_relu(inputs, is_training, data_format=data_format)
-    pooled_inputs = tf1.layers.max_pooling2d(inputs=inputs, pool_size=3, strides=2, padding="SAME", data_format=data_format)
-    inputs = tf.identity(pooled_inputs, "initial_max_pool")
+    with tf1.variable_scope(None, "initial-conv", reuse=None):
+      inputs = either(conv2d_fixed_padding(inputs=inputs, filters=64, kernel_size=7, strides=2, data_format=data_format), inputs)
+      inputs = either(batch_norm_relu(inputs, is_training, data_format=data_format), inputs)
+      inputs = tf.identity(inputs, "initial-conv")
+    with tf1.variable_scope(None, "initial_max_pool", reuse=None):
+      inputs = either(tf1.layers.max_pooling2d(inputs=inputs, pool_size=3, strides=2, padding="SAME", data_format=data_format), inputs)
+      inputs = tf.identity(inputs, "initial_max_pool")
     inputs = block_group(inputs=inputs, filters=64, block_fn=block_fn, blocks=layers[0], strides=1, is_training=is_training, name="block_group1", data_format=data_format)
     inputs = block_group(inputs=inputs, filters=128, block_fn=block_fn, blocks=layers[1], strides=2, is_training=is_training, name="block_group2", data_format=data_format)
     inputs = block_group(inputs=inputs, filters=256, block_fn=block_fn, blocks=layers[2], strides=2, is_training=is_training, name="block_group3", data_format=data_format)
     inputs = block_group(inputs=inputs, filters=512, block_fn=block_fn, blocks=layers[3], strides=2, is_training=is_training, name="block_group4", data_format=data_format)
     pool_size = [inputs.shape[1], inputs.shape[2]]
-    inputs = tf1.layers.average_pooling2d(inputs=inputs, pool_size=pool_size, strides=1, padding="VALID", data_format=data_format)
-    inputs = tf.identity(inputs, "final_avg_pool")
-    __e8 = None
-    if block_fn is bottleneck_block:
-      __e8 = 2048
-    else:
-      __e8 = 512
-    inputs = tf.reshape(inputs, [-1, __e8])
-    inputs = tf1.layers.dense(inputs=inputs, units=num_classes, kernel_initializer=tf1.random_normal_initializer(stddev=0.01))
-    return inputs
+    with tf1.variable_scope(None, "final_avg_pool", reuse=None):
+      inputs = either(tf1.layers.average_pooling2d(inputs=inputs, pool_size=pool_size, strides=1, padding="VALID", data_format=data_format), inputs)
+      inputs = tf.identity(inputs, "final_avg_pool")
+    __e16 = None
+    with tf1.variable_scope(None, "final_dense", reuse=None):
+      __e4 = None
+      __e17 = None
+      if block_fn is bottleneck_block:
+        __e4 = 2048
+        __e17 = __e4
+      else:
+        __e4 = 512
+        __e17 = __e4
+      inputs = either(tf.reshape(inputs, [-1, __e4]), inputs)
+      inputs = either(tf1.layers.dense(inputs=inputs, units=num_classes, kernel_initializer=tf1.random_normal_initializer(stddev=0.01)), inputs)
+      inputs = tf.identity(inputs, "final_dense")
+      __e16 = inputs
+    return __e16
   model.default_image_size = 224
   return model
 
@@ -403,22 +490,49 @@ def i(x=None):
 def o(x=None):
   return tf.transpose(x, [0, 3, 1, 2])
 
-def run_op(op=None, session=None):
-  if nil63(session):
-    session = getenv("session", "value")
-  session.run(tf.global_variables_initializer())
-  session.run(tf.local_variables_initializer())
-  return session.run(op)
+def run_op(op=None, *_args, **_keys):
+  ____r23 = unstash(list(_args), _keys)
+  __op = destash33(op, ____r23)
+  ____id4 = ____r23
+  __e18 = None
+  if nil63(has(____id4, "session")):
+    __e18 = tf1.get_default_session()
+  else:
+    __e18 = has(____id4, "session")
+  __session = __e18
+  ____x65 = object([])
+  ____x65["session"] = ["o", "session", ["tf1.get-default-session"]]
+  ____x65["rest"] = "keys"
+  __keys = without(cut(____id4, 0), ____x65)
+  return __session.run(__op, **__keys)
 
 from tensorflow.python.framework.ops import disable_eager_execution
 if not( "sess" in globals()):
   global sess
   sess = None
-def setup():
+def setup(graph=None):
+  if nil63(graph):
+    graph = tf1.Graph()
   global sess
   disable_eager_execution()
   if sess:
     sess.close()
-  sess = tf1.InteractiveSession()
+  sess = tf1.InteractiveSession(graph=graph)
   return sess
+
+def test_resnet(num_classes=None, shape=None, model_size=None, data_format=None):
+  if nil63(num_classes):
+    num_classes = 10
+  if nil63(shape):
+    shape = [1, 28, 28, 3]
+  if nil63(model_size):
+    model_size = 50
+  if nil63(data_format):
+    data_format = "channels_last"
+  setup()
+  __ph = tf1.placeholder(tf.float32, shape=shape)
+  __net = resnet_v1(model_size, num_classes, data_format=data_format)(__ph, is_training=True)
+  run_op(tf1.global_variables_initializer())
+  run_op(tf1.local_variables_initializer())
+  return [__ph, __net]
 

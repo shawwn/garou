@@ -1,6 +1,14 @@
 (from lumen import nil?)
 (from lumen import is?)
 (from lumen import getenv)
+(from lumen import setenv)
+(from lumen import either)
+(from lumen import unstash)
+(from lumen import destash!)
+(from lumen import has)
+(from lumen import object)
+(from lumen import without)
+(from lumen import cut)
 
 (from absl import flags)
 (import tensorflow as tf)
@@ -8,6 +16,27 @@
 (from tensorflow.python.tpu.ops import tpu-ops)
 (from tensorflow.python.training import moving-averages)
 
+(during-compilation
+  (def expanded-body (body)
+    (let form (expand `(%do ,@body))
+      (if (hd? form '%do) (tl form) (list form))))
+  
+  (def compiled-special? (form)
+    (and (list? form)
+         (hd? form string?)
+         (= (char (hd form) 0) "%")
+         (> (# (hd form)) 1)
+         (not (= (char (hd form) 1) "%")))))
+
+(mac tf-scope (name scope: (o scope 'nil) reuse: (o reuse 'nil) rest: body)
+  `(with (tf1.variable-scope ,scope ,name reuse: ,reuse)
+     ,@body))
+
+(mac tf-named (inputs name scope: (o scope 'nil) reuse: (o reuse 'nil) rest: body)
+  `(with (tf1.variable-scope ,scope ,name reuse: ,reuse)
+     ,@(map (fn (x) (if (compiled-special? x) x `(set ,inputs (either ,x ,inputs))))
+            (expanded-body body))
+     (set ,inputs (tf.identity ,inputs ,name))))
 
 (defconst BATCH-NORM-DECAY 0.9)
 (defconst BATCH-NORM-EPSILON 1e-5)
@@ -34,7 +63,7 @@
                                     (o is-training true)
                                     (o gamma-initializer nil)
                                     (o num-shards nil)
-                                    (o distributed-group-size 2)
+                                    (o distributed-group-size 1)
                                     (o scope nil))
   """Adds a Batch Normalization layer from http://arxiv.org/abs/1502.03167.
 
@@ -75,12 +104,12 @@
   Returns:
     A `Tensor` representing the output of the operation.
   """
-  (with (tf1.variable-scope scope "batch_normalization" (list inputs) reuse: nil)
-    (set inputs (tf.convert-to-tensor inputs)
-         inputs-shape (inputs (.get-shape))
-         params-shape (get inputs-shape (: -1 nil)))
-    (unless (params-shape (.is-fully-defined))
-      (raise (ValueError (% "Inputs %s has undefined `C` dimension %s." (inputs .name) params-shape))))
+  (set inputs (tf.convert-to-tensor inputs)
+       inputs-shape (inputs (.get-shape))
+       params-shape (get inputs-shape (: -1 nil)))
+  (unless (params-shape (.is-fully-defined))
+    (raise (ValueError (% "Inputs %s has undefined `C` dimension %s." (inputs .name) params-shape))))
+  (tf-scope "batch_normalization" scope: scope values: (list inputs) reuse: nil
     ; Allocate parameters for the beta and gamma of the normalization.
     (set beta (tf1.get-variable "beta"
                                 shape: params-shape
@@ -168,7 +197,7 @@
     A normalized `Tensor` with the same `data_format`.
   """
   (set num-cores (or num-cores 1)
-       distributed-group-size (or distributed-group-size 2))
+       distributed-group-size (or distributed-group-size 1))
   (set gamma-initializer ((if init-zero tf.zeros-initializer tf.ones-initializer)))
   (set axis (if (= data-format "channels_first") 1 3))
   (with inputs (if (> distributed-group-size 1)
@@ -356,7 +385,7 @@
   (set inputs (batch-norm-relu inputs is-training relu: false init-zero: true data-format: data-format))
   (tf1.nn.relu (+ inputs shortcut)))
 
-(def block-group (inputs filters block_fn blocks strides is_training name (o data_format "channels_first"))
+(def block-group (inputs filters block_fn blocks strides is_training name (o data_format "channels_first") (o scope nil))
   """Creates one group of blocks for the ResNet model.
 
   Args:
@@ -375,9 +404,10 @@
     The output `Tensor` of the block layer.
   """
   ; Only the first block per block_group uses projection shortcut and strides.
-  (set inputs (block-fn inputs filters is-training strides use-projection: true data-format: data-format))
-  (for _ in (range 1 blocks)
-    (set inputs (block-fn inputs filters is-training 1 data-format: data-format)))
+  (with (tf1.variable-scope scope name (list inputs) reuse: nil)
+    (set inputs (block-fn inputs filters is-training strides use-projection: true data-format: data-format))
+    (for _ in (range 1 blocks)
+      (set inputs (block-fn inputs filters is-training 1 data-format: data-format))))
   (tf.identity inputs name))
 
 (def resnet-v1 (resnet-depth num-classes (o data-format "channels_first"))
@@ -422,21 +452,19 @@
   (def model (inputs is-training)
     """Creation of the model graph."""
 
-    (set inputs (conv2d-fixed-padding
-                  inputs: inputs
-                  filters: 64
-                  kernel-size: 7
-                  strides: 2
-                  data-format: data-format)
-         inputs (tf.identity inputs "initial-conv")
-         inputs (batch-norm-relu inputs is-training data-format: data-format)
-
-         pooled-inputs (tf1.layers.max-pooling2d
-                         inputs: inputs pool-size: 3 strides: 2 padding: "SAME"
-                         data-format: data-format)
-         inputs (tf.identity pooled-inputs "initial_max_pool")
-
-         inputs (block-group
+    (tf-named inputs "initial-conv"
+      (conv2d-fixed-padding
+        inputs: inputs
+        filters: 64
+        kernel-size: 7
+        strides: 2
+        data-format: data-format)
+      (batch-norm-relu inputs is-training data-format: data-format))
+    (tf-named inputs "initial_max_pool"
+      (tf1.layers.max-pooling2d
+        inputs: inputs pool-size: 3 strides: 2 padding: "SAME"
+        data-format: data-format))
+    (set inputs (block-group
                   inputs: inputs filters: 64 block-fn: block-fn blocks: (at layers 0)
                   strides: 1 is-training: is-training name: "block_group1"
                   data-format: data-format)
@@ -455,15 +483,19 @@
     ; The activation is 7x7 so this is a global average pool.
     ; TODO(huangyp): reduce_mean will be faster.
     (set pool-size (list inputs.shape.1 inputs.shape.2))
-    (set inputs (tf1.layers.average-pooling2d
-                  inputs: inputs pool-size: pool-size strides: 1 padding: "VALID"
-                  data-format: data-format)
-         inputs (tf.identity inputs "final_avg_pool")
-         inputs (tf.reshape inputs (list -1 (if (is block-fn bottleneck-block ) 2048 512)))
-         inputs (tf1.layers.dense
-                  inputs: inputs
-                  units: num-classes
-                  kernel-initializer: (tf1.random-normal-initializer stddev: 0.01))))
+    (tf-named inputs "final_avg_pool"
+      (tf1.layers.average-pooling2d
+        inputs: inputs pool-size: pool-size strides: 1 padding: "VALID"
+        data-format: data-format))
+    (tf-named inputs "final_dense"
+      (tf.reshape inputs (list -1 (if (is block-fn bottleneck-block) 2048 512)))
+      (tf1.layers.dense inputs: inputs units: num-classes kernel-initializer: (tf1.random-normal-initializer stddev: 0.01))))
+    ; (set inputs (tf-named "final_dense"
+    ;               (set inputs (tf.reshape inputs (list -1 (if (is block-fn bottleneck-block) 2048 512)))
+    ;                    inputs (tf1.layers.dense
+    ;                             inputs: inputs
+    ;                             units: num-classes
+    ;                             kernel-initializer: (tf1.random-normal-initializer stddev: 0.01))))))
   (set model.default-image-size 224)
   model)
 
@@ -471,18 +503,26 @@
 (def i (x) (tf.transpose x '(0 2 3 1)))
 (def o (x) (tf.transpose x '(0 3 1 2)))
 
-(def run-op (op (t session))
-  (session.run (tf.global-variables-initializer))
-  (session.run (tf.local-variables-initializer))
-  (session.run op))
+(def run-op (op session: (o session (tf1.get-default-session)) rest: keys)
+  (session.run op (%literal |**| keys)))
 
 (from tensorflow.python.framework.ops import disable-eager-execution)
 
 (defvar sess nil)
 
-(def setup ()
+(def setup ((o graph (tf1.Graph)))
   (global sess)
   (disable-eager-execution)
   (when sess (sess (.close)))
-  (set sess (tf1 (.InteractiveSession))))
+  (set sess (tf1 (.InteractiveSession graph: graph))))
+
+(def test-resnet ((o num-classes 10) (o shape (list 1 28 28 3)) (o model-size 50) (o data-format "channels_last"))
+  (setup)
+  (let (ph (tf1.placeholder tf.float32 shape: shape)
+        net ((resnet-v1 model-size num-classes data-format: data-format) ph is-training: true))
+    (run-op (tf1.global-variables-initializer))
+    (run-op (tf1.local-variables-initializer))
+    (list ph net)))
+
+  
 
