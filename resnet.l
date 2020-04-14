@@ -12,7 +12,7 @@
 
 
 (def cross-replica-average (inputs num-shards distributed-group-size)
-  "Calculates the average value of inputs tensor across TPU replicas."
+  """Calculates the average value of inputs tensor across TPU replicas."""
   (let group-assignment nil
     (when (and (is? num-shards)
                (not (= distributed-group-size num-shards)))
@@ -27,7 +27,7 @@
 
 (def distributed-batch-norm (inputs (o decay BATCH-NORM-DECAY)
                                     (o epsilon BATCH-NORM-EPSILON)
-                                    (o is-training True)
+                                    (o is-training true)
                                     (o gamma-initializer nil)
                                     (o num-shards nil)
                                     (o distributed-group-size 2)
@@ -76,7 +76,7 @@
          inputs-shape (inputs (.get-shape))
          params-shape (get inputs-shape (: -1 nil)))
     (unless (params-shape (.is-fully-defined))
-      (throw (ValueError (% "Inputs %s has undefined `C` dimension %s." (inputs .name) params-shape))))
+      (raise (ValueError (% "Inputs %s has undefined `C` dimension %s." (inputs .name) params-shape))))
     ; Allocate parameters for the beta and gamma of the normalization.
     (set beta (tf.get-variable "beta"
                                 shape: params-shape
@@ -142,14 +142,14 @@
                (tf.cast variance moving-variance.dtype)
                decay
                zero-debias: false))
-        (tf.add-to-collection "update-ops" update-moving-mean)
-        (tf.add-to-collection "update-ops" update-moving-variance))
-      (outputs.set_shape inputs-shape))))
+        (tf.add-to-collection "update_ops" update-moving-mean)
+        (tf.add-to-collection "update_ops" update-moving-variance))
+      (outputs.set-shape inputs-shape))))
 
 (def batch-norm-relu (inputs is-training (o relu true) (o init-zero false) (o data-format "channels_first")
-                             (o num-cores FLAGS.num-cores)
-                             (o distributed-group-size FLAGS.distributed-group-size))
-  "Performs a batch normalization followed by a ReLU.
+                             (t num-cores)
+                             (t distributed-group-size))
+  """Performs a batch normalization followed by a ReLU.
 
   Args:
     inputs: `Tensor` of shape `[batch, channels, ...]`.
@@ -161,7 +161,8 @@
         width]` or \"channels_last\" for `[batch, height, width, channels]`.
 
   Returns:
-    A normalized `Tensor` with the same `data_format`."
+    A normalized `Tensor` with the same `data_format`.
+  """
   (set gamma-initializer ((if init-zero tf.zeros-initializer tf.ones-initializer)))
   (set axis (if (= data-format "channels_first") 1 3))
   (with inputs (if (> distributed-group-size 1)
@@ -187,5 +188,68 @@
     (when relu
       (set inputs (tf.nn.relu inputs)))))
 
-nil
+
+(def fixed-padding (inputs kernel-size (o data-format "channels_first"))
+  """Pads the input along the spatial dimensions independently of input size.
+
+  Args:
+    inputs: `Tensor` of size `[batch, channels, height, width]` or
+        `[batch, height, width, channels]` depending on `data_format`.
+    kernel_size: `int` kernel size to be used for `conv2d` or max_pool2d`
+        operations. Should be a positive integer.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    A padded `Tensor` of the same `data_format` with size either intact
+    (if `kernel_size == 1`) or padded (if `kernel_size > 1`).
+  """
+  (let (pad-total (- kernel-size 1)
+        pad-beg (// pad-total 2)
+        pad-end (- pad-total pad-beg))
+    (if (= data-format "channels_first")
+        (tf.pad inputs `((0 0) (0 0) (,pad-beg ,pad-end) (,pad-beg ,pad-end)))
+        (tf.pad inputs `((0 0) (,pad-beg ,pad-end) (,pad-beg ,pad-end) (0 0))))))
+
+(def conv2d-fixed-padding (inputs
+                           filters
+                           kernel-size
+                           strides
+                           (o data-format "channels_first"))
+  """Strided 2-D convolution with explicit padding.
+
+  The padding is consistent and is based only on `kernel_size`, not on the
+  dimensions of `inputs` (as opposed to using `tf.layers.conv2d` alone).
+
+  Args:
+    inputs: `Tensor` of size `[batch, channels, height_in, width_in]`.
+    filters: `int` number of filters in the convolution.
+    kernel_size: `int` size of the kernel to be used in the convolution.
+    strides: `int` strides of the convolution.
+    data_format: `str` either \"channels_first\" for `[batch, channels, height,
+        width]` or \"channels_last\" for `[batch, height, width, channels]`.
+
+  Returns:
+    A `Tensor` of shape `[batch, filters, height_out, width_out]`.
+  """
+  (when (> strides 1)
+    (set inputs (fixed-padding inputs kernel-size data-format: data-format)))
+
+  (tf.layers.conv2d
+      inputs: inputs
+      filters: filters
+      kernel-size: kernel-size
+      strides: strides
+      padding: (if (= strides 1) "SAME" "VALID")
+      use-bias: false
+      kernel-initializer: (tf.variance-scaling-initializer)
+      data-format: data-format))
+
+(def i (x) (tf.transpose x '(0 2 3 1)))
+(def o (x) (tf.transpose x '(0 3 1 2)))
+
+(def run-op (op (t session))
+  (session.run (tf.global-variables-initializer))
+  (session.run (tf.local-variables-initializer))
+  (session.run op))
 
